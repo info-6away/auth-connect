@@ -1,0 +1,187 @@
+# @6away/auth-connect
+
+Plug-and-play **6away Auth** for Next.js App Router apps. One small package + a
+handful of thin files, and your app authenticates against `auth.6away.ai` as a
+first-party OIDC relying party — PKCE, signed-cookie sessions, and RP-initiated
+logout included.
+
+It replaces the copy-paste integration dance (the one Ritual and GCP Pro each
+did by hand, and drifted apart doing) with a single versioned source of truth.
+
+**Connect a new app in ~15 minutes:** 5 env vars → 4 files → done.
+
+---
+
+## Install
+
+Distributed by git URL — no private npm registry, no monorepo.
+
+```bash
+npm install "github:6away/auth-connect#v1"
+# package.json:  "@6away/auth-connect": "github:6away/auth-connect#v1"
+```
+
+Pin a tag (`#v1`, `#v1.2.0`) so upgrades are deliberate.
+
+## 1. Environment variables
+
+The whole contract is five vars (copy `template/.env.example`):
+
+| Var | Secret? | Example |
+| --- | --- | --- |
+| `AUTH_CLIENT_ID` | ✅ | `pgify` |
+| `AUTH_CLIENT_SECRET` | ✅ | `…` |
+| `SESSION_SECRET` | ✅ | 32-byte base64url |
+| `NEXT_PUBLIC_AUTH_URL` | — | `https://auth.6away.ai` |
+| `NEXT_PUBLIC_APP_URL` | — | `https://app.pgify.guru` |
+
+```bash
+# generate a SESSION_SECRET
+node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
+```
+
+## 2. Configure once
+
+Copy `template/lib/auth-config.ts` and `template/lib/auth.ts`. Set your cookie
+name and protected paths:
+
+```ts
+// lib/auth-config.ts        (plain constants — no server-only imports)
+export const SESSION_COOKIE  = "pgify_session";
+export const DEFAULT_RETURN_TO = "/app";
+export const PROTECTED_PATHS = ["/app/:path*"];
+```
+
+```ts
+// lib/auth.ts
+import { createAuthConnect } from "@6away/auth-connect";
+import { SESSION_COOKIE, DEFAULT_RETURN_TO } from "@/lib/auth-config";
+
+export const { routes, getSession, requireSession, getCurrentUser, destroySession } =
+  createAuthConnect({
+    cookieName: SESSION_COOKIE,
+    defaultReturnTo: DEFAULT_RETURN_TO,
+  });
+```
+
+## 3. Three route handlers
+
+Copy the three files under `template/app/api/auth/`. Each is one line of glue:
+
+```ts
+// app/api/auth/signin/route.ts
+import { routes } from "@/lib/auth";
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const GET = routes.signin;
+```
+
+…and likewise `callback/6away/route.ts` (`routes.callback`) and
+`signout/route.ts` (`routes.signout`, as both `GET` and `POST`).
+
+> **Register `https://<app-origin>/api/auth/callback/6away`** as a redirect URI
+> on your client in `auth.6away.ai` — plus your localhost and any preview hosts.
+
+## 4. Protect routes (middleware)
+
+Copy `template/middleware.ts`:
+
+```ts
+import { createAuthMiddleware } from "@6away/auth-connect/middleware";
+import { SESSION_COOKIE, PROTECTED_PATHS } from "@/lib/auth-config";
+
+export default createAuthMiddleware({ cookieName: SESSION_COOKIE, protect: PROTECTED_PATHS });
+export const config = { matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"] };
+```
+
+Anonymous hits to a protected path are bounced to sign-in with a `returnTo`.
+Auth routes and static assets are bypassed automatically. (The middleware is an
+*optimistic* cookie-presence gate; the real check is server-side — see below.)
+
+## 5. Read the user
+
+```ts
+// the common case — standardized { sub, email, name } | null
+const user = await getCurrentUser();
+
+// in a protected Server Component — redirects to sign-in if absent
+const session = await requireSession();   // never null
+
+// when you want to branch on auth without redirecting
+const session = await getSession();        // full payload | null
+```
+
+Done.
+
+---
+
+## DB-less vs DB-backed apps
+
+The only real fork between integrations. The layer handles both through one
+optional hook.
+
+- **DB-less** (the session cookie *is* the user): omit `onSignIn`.
+- **DB-backed** (you keep a local `users` row): provide `onSignIn`, match on
+  `profile.sub` (**never email** — `sub` is the stable identity), and return
+  extra fields. They're type-merged into every session result:
+
+```ts
+createAuthConnect<{ userId: string }>({
+  cookieName: SESSION_COOKIE,
+  onSignIn: async (profile) => {
+    const user = await upsertUserBySub(profile.sub, {
+      email: profile.email ?? null,
+      name: profile.name ?? null,
+    });
+    return { userId: user.id };
+  },
+});
+
+// later:  const { userId } = await requireSession();  // typed
+```
+
+## API
+
+| Export | Purpose |
+| --- | --- |
+| `createAuthConnect(config)` | Returns `{ routes, getSession, requireSession, getCurrentUser, destroySession }` |
+| `createAuthMiddleware(config)` | `@6away/auth-connect/middleware` — route-protection gate |
+| `safeReturnTo(input, fallback?)` | Open-redirect-safe path validator |
+| types | `AuthConnectConfig`, `CurrentUser`, `BaseSession`, `UserInfo`, `TokenResponse` |
+
+`createAuthConnect` config: `cookieName` (required), `defaultReturnTo`,
+`scopes`, `cookiePrefix`, `signInPath`, `onSignIn`.
+
+## Security notes
+
+- **Match identity by `sub`, never email.** Email can change at the IdP; `sub`
+  is stable for the life of the account.
+- **`returnTo` is open-redirect-safe.** `safeReturnTo` rejects `//evil.com` and
+  `/\evil.com`, applied both when storing and when reading.
+- **Sessions are HMAC-signed** (`SESSION_SECRET`), `httpOnly`, `secure` in
+  production, and expiry-enforced on every read.
+- **Middleware is optimistic.** It only checks cookie *presence*. A forged
+  cookie passes the gate but fails `getSession`/`requireSession`, which is the
+  real boundary. Never trust the middleware gate alone for sensitive data.
+
+## Versioning & upgrades
+
+Tagged releases (`v1`, `v1.1.0`, …). Bump the `#tag` in `package.json` to
+upgrade on your schedule — every app shares this code, so a fix lands
+everywhere on the next bump instead of being hand-ported (which is exactly how
+the GCP open-redirect drift happened).
+
+## Local development of this package
+
+```bash
+npm install
+npm run build       # tsc -> dist/  (+ .d.ts)
+npm run validate    # typecheck examples/throwaway against src (the "new app" flow)
+```
+
+---
+
+> **Roadmap:** today, registering a client still means manual SQL + secrets +
+> redirect URIs in `auth.6away.ai`. Next phase is self-service:
+> `auth.6away.ai/admin` → Create Client → generate secret → copy these five env
+> vars → done. This package is the client half of that story.
