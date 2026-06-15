@@ -115,6 +115,26 @@ remain the authoritative check.
 > missing the gate degrades to an optimistic presence check and logs a warning
 > once — it never silently locks everyone out.
 
+### `middleware.ts` (Next ≤15) vs `proxy.ts` (Next 16)
+
+The gate function is the same; only the file name and export shape differ by
+Next.js version:
+
+| Next.js | File | Export | Template |
+| --- | --- | --- | --- |
+| ≤ 15 | `middleware.ts` | `export default createAuthMiddleware(...)` | `template/middleware.ts` |
+| 16 | `proxy.ts` | `export const proxy = createAuthMiddleware(...)` (named) | `template/proxy.ts` |
+
+Use the file/template that matches your Next version — having a `middleware.ts`
+default export on Next 16 (or a `proxy.ts` on ≤15) means the gate silently never
+runs.
+
+**Already have a `proxy.ts` / `middleware.ts` with rewrite or host logic?** The
+drop-in replaces the whole file, so instead *compose* the gate into your existing
+handler: compute your effective (post-rewrite) path, run the gate against it, and
+honour a 3xx (sign-in bounce) before applying your rewrite. Full worked example:
+`template/proxy.composed.example.ts`.
+
 ## 5. Read the user
 
 ```ts
