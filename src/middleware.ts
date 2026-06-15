@@ -2,6 +2,7 @@
 // middleware (imported from "@6away/auth-connect/middleware"), which runs
 // outside the React Server Component graph.
 import { NextResponse, type NextRequest } from "next/server";
+import { verifySessionCookie } from "./session-verify";
 
 export type MiddlewareConfig = {
   /** Session cookie name — must match the `cookieName` passed to createAuthConnect. */
@@ -14,6 +15,15 @@ export type MiddlewareConfig = {
   protect: string[];
   /** Sign-in route to bounce anonymous users to. Default "/api/auth/signin". */
   signInPath?: string;
+  /**
+   * HMAC secret used to verify the session cookie signature + expiry at the
+   * edge. Defaults to `process.env.SESSION_SECRET` (the same value session.ts
+   * signs with). When a secret is available the middleware performs FULL
+   * verification — a forged or expired cookie is rejected here, not just
+   * server-side. When no secret can be resolved it degrades to an optimistic
+   * presence check and warns once.
+   */
+  sessionSecret?: string;
 };
 
 // Reduce a protect entry to its literal prefix: "/app/:path*" -> "/app",
@@ -31,18 +41,29 @@ function isProtected(pathname: string, prefixes: string[]): boolean {
   });
 }
 
+let warnedNoSecret = false;
+
 /**
- * Build a Next.js middleware that bounces anonymous users away from protected
- * paths. This is an *optimistic* gate — it only checks for the presence of the
- * session cookie, not its HMAC validity. Real verification happens server-side
- * in `getSession`/`requireSession`; a forged cookie passes the gate but is
- * rejected there. Auth routes, Next internals, and static assets are bypassed.
+ * Build a Next.js middleware that bounces unauthenticated users away from
+ * protected paths.
+ *
+ * When a session secret is available (config.sessionSecret or
+ * process.env.SESSION_SECRET) the gate FULLY verifies the session cookie:
+ * HMAC-SHA256 signature + `exp`. A forged, tampered, or expired cookie is
+ * rejected at the edge and the user is redirected to sign-in. Server-side
+ * `getSession`/`requireSession` remain the authoritative second line.
+ *
+ * If no secret can be resolved (misconfiguration) it degrades to an optimistic
+ * presence check and logs a warning once, so a missing edge env var cannot
+ * silently lock every user out — but verification is the intended path.
+ *
+ * Auth routes, Next internals, and static assets are always bypassed.
  */
 export function createAuthMiddleware(config: MiddlewareConfig) {
   const { cookieName, signInPath = "/api/auth/signin" } = config;
   const prefixes = config.protect.map(toPrefix);
 
-  return function middleware(req: NextRequest): NextResponse {
+  return async function middleware(req: NextRequest): Promise<NextResponse> {
     const { pathname, search } = req.nextUrl;
 
     // Bypass auth routes, Next internals, and any file with an extension
@@ -57,10 +78,32 @@ export function createAuthMiddleware(config: MiddlewareConfig) {
 
     if (!isProtected(pathname, prefixes)) return NextResponse.next();
 
-    if (req.cookies.get(cookieName)?.value) return NextResponse.next();
+    const cookie = req.cookies.get(cookieName)?.value;
 
-    const signInUrl = new URL(signInPath, req.url);
-    signInUrl.searchParams.set("returnTo", pathname + search);
-    return NextResponse.redirect(signInUrl);
+    const bounce = (): NextResponse => {
+      const signInUrl = new URL(signInPath, req.url);
+      signInUrl.searchParams.set("returnTo", pathname + search);
+      return NextResponse.redirect(signInUrl);
+    };
+
+    if (!cookie) return bounce();
+
+    const secret = config.sessionSecret ?? process.env.SESSION_SECRET;
+    if (!secret) {
+      if (!warnedNoSecret) {
+        warnedNoSecret = true;
+        console.warn(
+          "[auth-connect] middleware: no SESSION_SECRET available at the edge — " +
+            "falling back to an optimistic cookie-presence check. Set SESSION_SECRET " +
+            "(or pass sessionSecret) to enable full HMAC + expiry verification.",
+        );
+      }
+      return NextResponse.next();
+    }
+
+    const verified = await verifySessionCookie(cookie, secret);
+    if (!verified) return bounce();
+
+    return NextResponse.next();
   };
 }

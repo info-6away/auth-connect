@@ -17,11 +17,20 @@ did by hand, and drifted apart doing) with a single versioned source of truth.
 Distributed by git URL — no private npm registry, no monorepo.
 
 ```bash
-npm install "github:6away/auth-connect#v1"
-# package.json:  "@6away/auth-connect": "github:6away/auth-connect#v1"
+npm install "github:info-6away/auth-connect#v1.0.0"
+# package.json:  "@6away/auth-connect": "github:info-6away/auth-connect#v1.0.0"
 ```
 
-Pin a tag (`#v1`, `#v1.2.0`) so upgrades are deliberate.
+Pin a tag (`#v1.0.0`, `#v1.1.0`, …) so upgrades are deliberate.
+
+> **Built on install.** `dist/` is **not** committed. npm runs the package's
+> `prepare` script after cloning the git ref, which builds `dist/` from source
+> (`tsc`). npm installs this package's `devDependencies` (TypeScript, Next, React
+> types) for that build automatically, then ships only `dist/`, `template/`, and
+> this README to your `node_modules`. The only runtime dependency that lands in
+> your tree is `jose` (JWKS verification); `next`/`react` are peer deps you
+> already have. Requires git available in the install environment (it is on
+> Vercel and CI by default).
 
 ## 1. Environment variables
 
@@ -95,8 +104,16 @@ export const config = { matcher: ["/((?!_next/static|_next/image|favicon.ico).*)
 ```
 
 Anonymous hits to a protected path are bounced to sign-in with a `returnTo`.
-Auth routes and static assets are bypassed automatically. (The middleware is an
-*optimistic* cookie-presence gate; the real check is server-side — see below.)
+Auth routes and static assets are bypassed automatically. The middleware fully
+**verifies the session cookie's HMAC signature and expiry at the edge** (using
+`SESSION_SECRET`), so forged or expired cookies are rejected here too — see
+[Security notes](#security-notes). Server-side `getSession`/`requireSession`
+remain the authoritative check.
+
+> **Edge env:** `SESSION_SECRET` must be available to the middleware runtime
+> (it already is on Vercel, where server env vars are injected). If it is ever
+> missing the gate degrades to an optimistic presence check and logs a warning
+> once — it never silently locks everyone out.
 
 ## 5. Read the user
 
@@ -154,15 +171,27 @@ createAuthConnect<{ userId: string }>({
 
 ## Security notes
 
+- **ID token is cryptographically verified.** On every sign-in the `id_token`'s
+  RS256 signature is checked against the IdP's published JWKS
+  (`/.well-known/jwks.json`), along with `iss` (must be your `NEXT_PUBLIC_AUTH_URL`),
+  `aud` (your `AUTH_CLIENT_ID`), and expiry. The verified token — not the
+  userinfo response — is the source of identity truth.
+- **Nonce replay protection.** Each sign-in sends a single-use `nonce`; the
+  callback rejects any `id_token` whose `nonce` claim doesn't match, defeating
+  token replay/injection. PKCE (S256) and `state` are also enforced.
+- **`sub` cross-check.** The userinfo `sub` must equal the verified `id_token`
+  `sub`, blocking token-substitution.
 - **Match identity by `sub`, never email.** Email can change at the IdP; `sub`
   is stable for the life of the account.
 - **`returnTo` is open-redirect-safe.** `safeReturnTo` rejects `//evil.com` and
   `/\evil.com`, applied both when storing and when reading.
 - **Sessions are HMAC-signed** (`SESSION_SECRET`), `httpOnly`, `secure` in
   production, and expiry-enforced on every read.
-- **Middleware is optimistic.** It only checks cookie *presence*. A forged
-  cookie passes the gate but fails `getSession`/`requireSession`, which is the
-  real boundary. Never trust the middleware gate alone for sensitive data.
+- **Middleware verifies, not just sniffs.** The gate checks the cookie's
+  HMAC-SHA256 signature and `exp` at the edge (Web Crypto, Edge/Node compatible),
+  so a forged or expired cookie is rejected there. `getSession`/`requireSession`
+  remain the authoritative server-side boundary; still don't rely on the gate
+  alone for the most sensitive operations.
 
 ## Versioning & upgrades
 

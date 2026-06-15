@@ -8,6 +8,7 @@ import {
   callbackUriForRequest,
   exchangeCode,
   fetchUserInfo,
+  verifyIdToken,
   type TokenResponse,
   type UserInfo,
 } from "./oidc";
@@ -81,6 +82,7 @@ export function createAuthConnect<S extends Record<string, unknown> = Record<str
   const C = {
     pkce: `${cookiePrefix}_pkce`,
     state: `${cookiePrefix}_state`,
+    nonce: `${cookiePrefix}_nonce`,
     return: `${cookiePrefix}_return`,
     redirect: `${cookiePrefix}_redirect`,
   };
@@ -92,16 +94,24 @@ export function createAuthConnect<S extends Record<string, unknown> = Record<str
 
     const { verifier, challenge } = makePkce();
     const state = randomToken(16);
+    // Nonce binds the id_token to this very sign-in attempt: the IdP echoes it
+    // into the id_token, and the callback rejects any token whose nonce claim
+    // doesn't match this cookie (replay / token-injection defense).
+    const nonce = randomToken(16);
 
     const jar = await cookies();
     jar.set(C.pkce, verifier, SHORT_COOKIE);
     jar.set(C.state, state, SHORT_COOKIE);
+    jar.set(C.nonce, nonce, SHORT_COOKIE);
     jar.set(C.return, returnTo, SHORT_COOKIE);
     // The exact redirect_uri sent to /authorize must be echoed byte-for-byte at
     // token exchange, so persist it rather than re-deriving on the callback.
     jar.set(C.redirect, redirectUri, SHORT_COOKIE);
 
-    return Response.redirect(buildAuthorizeUrl({ state, challenge, redirectUri, scope: scopes }), 303);
+    return Response.redirect(
+      buildAuthorizeUrl({ state, nonce, challenge, redirectUri, scope: scopes }),
+      303,
+    );
   }
 
   async function callback(req: Request): Promise<Response> {
@@ -113,10 +123,12 @@ export function createAuthConnect<S extends Record<string, unknown> = Record<str
     const jar = await cookies();
     const verifier = jar.get(C.pkce)?.value ?? null;
     const cookieState = jar.get(C.state)?.value ?? null;
+    const cookieNonce = jar.get(C.nonce)?.value ?? null;
     const returnTo = jar.get(C.return)?.value ?? defaultReturnTo;
     const redirectUri = jar.get(C.redirect)?.value ?? null;
     jar.delete(C.pkce);
     jar.delete(C.state);
+    jar.delete(C.nonce);
     jar.delete(C.return);
     jar.delete(C.redirect);
 
@@ -137,11 +149,30 @@ export function createAuthConnect<S extends Record<string, unknown> = Record<str
       return fail("token_exchange");
     }
 
+    // Verify the id_token's RS256 signature (JWKS), issuer, audience and expiry
+    // before trusting anything in it.
+    let idClaims;
+    try {
+      idClaims = await verifyIdToken(tokens.id_token);
+    } catch {
+      return fail("id_token");
+    }
+    // Bind the token to this sign-in attempt: its nonce must match the one we set.
+    if (!cookieNonce || idClaims.nonce !== cookieNonce) {
+      return fail("invalid_nonce");
+    }
+
     let profile: UserInfo;
     try {
       profile = await fetchUserInfo(tokens.access_token);
     } catch {
       return fail("userinfo");
+    }
+
+    // The verified id_token is the source of identity truth; userinfo only
+    // supplies profile fields. Reject any mismatch (token-substitution defense).
+    if (profile.sub !== idClaims.sub) {
+      return fail("sub_mismatch");
     }
 
     let extra: S;

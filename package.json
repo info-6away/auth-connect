@@ -27,6 +27,7 @@
     "prepare": "npm run build"
   },
   "dependencies": {
+    "jose": "^5.9.6",
     "server-only": "^0.0.1"
   },
   "peerDependencies": {

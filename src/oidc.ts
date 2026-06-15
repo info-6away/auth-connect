@@ -1,4 +1,5 @@
 import "server-only";
+import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
 import { authEnv, CALLBACK_PATH } from "./config";
 
 export type TokenResponse = {
@@ -63,6 +64,7 @@ export async function fetchUserInfo(accessToken: string): Promise<UserInfo> {
 
 export function buildAuthorizeUrl(input: {
   state: string;
+  nonce: string;
   challenge: string;
   redirectUri: string;
   scope?: string;
@@ -73,9 +75,44 @@ export function buildAuthorizeUrl(input: {
   url.searchParams.set("scope", input.scope ?? "openid profile email");
   url.searchParams.set("redirect_uri", input.redirectUri);
   url.searchParams.set("state", input.state);
+  url.searchParams.set("nonce", input.nonce);
   url.searchParams.set("code_challenge", input.challenge);
   url.searchParams.set("code_challenge_method", "S256");
   return url.toString();
+}
+
+// ID-token claims we rely on after verification. The 6away IdP issues only the
+// standard claims (sub, iss, aud, exp, iat, nonce, auth_time, sid) in the
+// authorization-code id_token — profile fields (email/name) come from the
+// userinfo endpoint — so `sub` and `nonce` are what we read here.
+export type IdTokenClaims = JWTPayload & { nonce?: string };
+
+// createRemoteJWKSet caches and rotates the IdP's signing keys internally; build
+// it once per issuer rather than refetching JWKS on every callback.
+let jwks: ReturnType<typeof createRemoteJWKSet> | null = null;
+let jwksIssuer: string | null = null;
+function getJwks(): ReturnType<typeof createRemoteJWKSet> {
+  if (!jwks || jwksIssuer !== authEnv.issuer) {
+    jwks = createRemoteJWKSet(new URL(`${authEnv.issuer}/.well-known/jwks.json`));
+    jwksIssuer = authEnv.issuer;
+  }
+  return jwks;
+}
+
+/**
+ * Cryptographically verify the id_token: RS256 signature against the IdP's
+ * published JWKS, plus `iss` (must equal our issuer) and `aud` (must equal our
+ * client id), and `exp`/`nbf` (enforced by jose). Throws on any failure.
+ * Returns the verified claims; the caller must additionally bind `nonce` to the
+ * value it sent and cross-check `sub` against userinfo.
+ */
+export async function verifyIdToken(idToken: string): Promise<IdTokenClaims> {
+  const { payload } = await jwtVerify(idToken, getJwks(), {
+    issuer: authEnv.issuer,
+    audience: authEnv.clientId,
+  });
+  if (!payload.sub) throw new Error("id_token missing sub");
+  return payload as IdTokenClaims;
 }
 
 // Derive the OIDC callback URL from the incoming request host so the flow works
