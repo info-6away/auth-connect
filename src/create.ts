@@ -132,10 +132,34 @@ export function createAuthConnect<S extends Record<string, unknown> = Record<str
     jar.delete(C.return);
     jar.delete(C.redirect);
 
-    // Same-origin error redirect. url.origin is the app's own origin, so it is
-    // always a safe absolute base.
-    const fail = (reason: string): Response =>
-      Response.redirect(new URL(`/?auth_error=${encodeURIComponent(reason)}`, url.origin).toString(), 303);
+    // Render a self-contained error page instead of redirecting. Redirecting a
+    // failed callback into the app loops forever on fully-gated apps: every
+    // page bounces back to sign-in → IdP (still has a session) → callback →
+    // fail → … with no exit. The callback route is never gated, so rendering
+    // the error here surfaces the reason and offers a manual retry, with no
+    // automatic redirect to loop on.
+    const fail = (reason: string, status = 400): Response => {
+      const slug = reason.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 64) || "unknown";
+      const retry = `${signInPath}?returnTo=${encodeURIComponent(defaultReturnTo)}`;
+      const body =
+        `<!doctype html><html lang="en"><head><meta charset="utf-8">` +
+        `<meta name="viewport" content="width=device-width,initial-scale=1">` +
+        `<title>Sign-in failed</title>` +
+        `<style>body{margin:0;min-height:100vh;display:grid;place-items:center;` +
+        `font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#0b0b0c;color:#e8e8ea}` +
+        `main{max-width:30rem;padding:2rem;text-align:center}h1{font-size:1.25rem;margin:0 0 .5rem}` +
+        `p{margin:.25rem 0;color:#a1a1aa}code{color:#e8e8ea}` +
+        `a{display:inline-block;margin-top:1.25rem;color:#fff;background:#3b82f6;` +
+        `padding:.6rem 1rem;border-radius:.5rem;text-decoration:none}</style></head>` +
+        `<body><main><h1>Sign-in couldn't be completed</h1>` +
+        `<p>Something went wrong finishing your sign-in.</p>` +
+        `<p>Reason: <code>${slug}</code></p>` +
+        `<a href="${retry}">Try again</a></main></body></html>`;
+      return new Response(body, {
+        status,
+        headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+      });
+    };
 
     if (oidcError) return fail(oidcError);
     if (!code || !state || !verifier || !redirectUri || state !== cookieState) {

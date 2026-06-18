@@ -1,6 +1,6 @@
 {
   "name": "@6away/auth-connect",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "Plug-and-play 6away Auth (OIDC) relying-party layer for Next.js App Router apps.",
   "type": "module",
   "license": "UNLICENSED",

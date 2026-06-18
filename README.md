@@ -207,6 +207,13 @@ createAuthConnect<{ userId: string }>({
   `/\evil.com`, applied both when storing and when reading.
 - **Sessions are HMAC-signed** (`SESSION_SECRET`), `httpOnly`, `secure` in
   production, and expiry-enforced on every read.
+- **Callback failures render an error page, never redirect into the app.** A
+  failed sign-in callback (bad token exchange, id_token, nonce, etc.) returns a
+  self-contained error page with a manual "Try again" link — it does **not**
+  redirect to `/`. On a fully-gated app (e.g. one whose host serves everything
+  under a protected prefix), redirecting a failure into the app would loop
+  forever (page → sign-in → IdP → callback → fail → page → …). Rendering at the
+  callback URL (which is never gated) breaks that loop.
 - **Middleware verifies, not just sniffs.** The gate checks the cookie's
   HMAC-SHA256 signature and `exp` at the edge (Web Crypto, Edge/Node compatible),
   so a forged or expired cookie is rejected there. `getSession`/`requireSession`
