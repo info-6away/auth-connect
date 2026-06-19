@@ -17,11 +17,11 @@ did by hand, and drifted apart doing) with a single versioned source of truth.
 Distributed by git URL — no private npm registry, no monorepo.
 
 ```bash
-npm install "github:info-6away/auth-connect#v1.0.0"
-# package.json:  "@6away/auth-connect": "github:info-6away/auth-connect#v1.0.0"
+npm install "github:info-6away/auth-connect#v1.0.2"
+# package.json:  "@6away/auth-connect": "github:info-6away/auth-connect#v1.0.2"
 ```
 
-Pin a tag (`#v1.0.0`, `#v1.1.0`, …) so upgrades are deliberate.
+Pin a tag (`#v1.0.2`, `#v1.1.0`, …) so upgrades are deliberate.
 
 > **Built on install.** `dist/` is **not** committed. npm runs the package's
 > `prepare` script after cloning the git ref, which builds `dist/` from source
@@ -42,12 +42,29 @@ The whole contract is five vars (copy `template/.env.example`):
 | `AUTH_CLIENT_SECRET` | ✅ | `…` |
 | `SESSION_SECRET` | ✅ | 32-byte base64url |
 | `NEXT_PUBLIC_AUTH_URL` | — | `https://auth.6away.ai` |
-| `NEXT_PUBLIC_APP_URL` | — | `https://app.pgify.guru` |
+| `NEXT_PUBLIC_APP_URL` | — | `https://your-app.com` |
 
 ```bash
 # generate a SESSION_SECRET
 node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
 ```
+
+> ### Need a client ID?
+>
+> **`AUTH_CLIENT_ID` / `AUTH_CLIENT_SECRET` are issued per app — and for now,
+> registration is manual.** Until `auth.6away.ai/admin` (self-service) is live,
+> email **support@6away.ai** with:
+>
+> - app name
+> - production app URL
+> - callback URL — `https://<your-app-origin>/api/auth/callback/6away`
+> - post-logout URL — usually your app origin
+> - whether signup is **open** or **invite-only**
+> - support email
+>
+> You'll get back your `AUTH_CLIENT_ID`, `AUTH_CLIENT_SECRET`, and confirmation
+> that your callback URLs are registered. *(Temporary — this whole step becomes
+> self-serve once `/admin` ships.)*
 
 ## 2. Configure once
 
@@ -60,6 +77,19 @@ export const SESSION_COOKIE  = "pgify_session";
 export const DEFAULT_RETURN_TO = "/app";
 export const PROTECTED_PATHS = ["/app/:path*"];
 ```
+
+> **Customize these to your app** — the `/app` values are just PGify's. Set
+> `PROTECTED_PATHS` to whatever you want gated and `DEFAULT_RETURN_TO` to where
+> users land after sign-in. Make `SESSION_COOKIE` app-unique. Examples:
+>
+> ```ts
+> // a dashboard app
+> export const DEFAULT_RETURN_TO = "/dashboard";
+> export const PROTECTED_PATHS = ["/dashboard/:path*", "/settings/:path*"];
+>
+> // protect everything except marketing + auth routes
+> export const PROTECTED_PATHS = ["/((?!api/auth|_next|^/$).*)"];
+> ```
 
 ```ts
 // lib/auth.ts
@@ -149,6 +179,21 @@ const session = await getSession();        // full payload | null
 ```
 
 Done.
+
+## Verify it works (smoke test)
+
+With your client registered (above), run `npm run dev` and check, in order:
+
+1. **Gate** — open a protected path while signed out (e.g. `/app`). You're redirected to `/api/auth/signin`, then on to `auth.6away.ai`.
+2. **Sign in** — complete Google sign-in. You land back on your app at the path you started from, signed in.
+3. **Session persists** — refresh. You stay signed in (no re-auth).
+4. **Public stays public** — your marketing/landing routes load with no redirect.
+5. **Open-redirect guard** — `…/api/auth/signin?returnTo=//evil.com` must land on your app, never off-origin.
+6. **Sign out** — hit `/api/auth/signout`. The session clears, you're returned to your app origin, and revisiting the protected path redirects to sign-in again.
+
+> Testing a Vercel **preview**? Register that preview host's callback too
+> (`https://<preview-host>/api/auth/callback/6away`) and make sure Deployment
+> Protection isn't fronting the deployment (it 401s before your app runs).
 
 ---
 
