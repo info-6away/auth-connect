@@ -110,6 +110,7 @@ export async function verifyIdToken(idToken: string): Promise<IdTokenClaims> {
   const { payload } = await jwtVerify(idToken, getJwks(), {
     issuer: authEnv.issuer,
     audience: authEnv.clientId,
+    algorithms: ["RS256"],
   });
   if (!payload.sub) throw new Error("id_token missing sub");
   return payload as IdTokenClaims;
