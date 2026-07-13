@@ -6,3 +6,5 @@ export type { AuthConnect, AuthConnectConfig, CurrentUser } from "./create";
 export type { BaseSession } from "./session";
 export type { TokenResponse, UserInfo } from "./oidc";
 export { safeReturnTo } from "./return-to";
+export { ERROR_REASONS } from "./error-path";
+export type { ErrorReason } from "./error-path";

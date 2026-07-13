@@ -14,6 +14,7 @@ import {
 } from "./oidc";
 import { makeSessionStore, type BaseSession } from "./session";
 import { safeReturnTo } from "./return-to";
+import { assertSafeErrorPath, buildFailureResponse } from "./error-path";
 
 /** The standardized signed-in user every app reads via `getCurrentUser()`. */
 export type CurrentUser = {
@@ -40,6 +41,23 @@ export type AuthConnectConfig<S extends Record<string, unknown> = Record<string,
    * session — e.g. `{ userId }`. DB-less apps omit this entirely.
    */
   onSignIn?: (profile: UserInfo, tokens: TokenResponse) => Promise<S> | S;
+  /**
+   * Optional internal path that owns the sign-in-failure experience, e.g.
+   * "/auth/error". When set, a failed callback redirects there with a single
+   * sanitised query param — `?reason=<slug>` from a fixed allowlist (see
+   * `ErrorReason`) — instead of rendering auth-connect's built-in page. No
+   * tokens, codes, state, nonce or raw provider errors are ever included.
+   *
+   * IMPORTANT: this path MUST be publicly reachable (exclude it from your
+   * proxy/middleware matcher). If the error page is itself gated, a failed
+   * callback bounces to sign-in → IdP (still signed in) → callback → fail →
+   * … forever. That loop is exactly why the default is a self-contained page
+   * rather than a redirect.
+   *
+   * Validated at construction: a non-same-origin value throws rather than
+   * silently becoming an open redirect.
+   */
+  errorPath?: string;
 };
 
 export type AuthConnect<S extends Record<string, unknown>> = {
@@ -67,7 +85,12 @@ export function createAuthConnect<S extends Record<string, unknown> = Record<str
     cookiePrefix = "ac",
     signInPath = "/api/auth/signin",
     onSignIn,
+    errorPath,
   } = config;
+
+  // Fail closed at construction: an unsafe errorPath throws at boot rather than
+  // turning a user's failed sign-in into an open redirect.
+  const safeErrorPath = errorPath === undefined ? undefined : assertSafeErrorPath(errorPath);
 
   const store = makeSessionStore<S>(cookieName);
 
@@ -132,32 +155,29 @@ export function createAuthConnect<S extends Record<string, unknown> = Record<str
     jar.delete(C.return);
     jar.delete(C.redirect);
 
-    // Render a self-contained error page instead of redirecting. Redirecting a
-    // failed callback into the app loops forever on fully-gated apps: every
-    // page bounces back to sign-in → IdP (still has a session) → callback →
-    // fail → … with no exit. The callback route is never gated, so rendering
-    // the error here surfaces the reason and offers a manual retry, with no
-    // automatic redirect to loop on.
+    // By default, render a self-contained error page rather than redirecting:
+    // redirecting a failed callback into the app loops forever on fully-gated
+    // apps (every page bounces back to sign-in → IdP, which still has a session
+    // → callback → fail → …, with no exit). The callback route is never gated,
+    // so rendering here surfaces the reason and offers a manual retry.
+    //
+    // An app that sets `errorPath` opts into the redirect and takes on the
+    // responsibility of keeping that path public. Both shapes are built by
+    // `buildFailureResponse` (pure, unit-tested).
     const fail = (reason: string, status = 400): Response => {
-      const slug = reason.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 64) || "unknown";
-      const retry = `${signInPath}?returnTo=${encodeURIComponent(defaultReturnTo)}`;
-      const body =
-        `<!doctype html><html lang="en"><head><meta charset="utf-8">` +
-        `<meta name="viewport" content="width=device-width,initial-scale=1">` +
-        `<title>Sign-in failed</title>` +
-        `<style>body{margin:0;min-height:100vh;display:grid;place-items:center;` +
-        `font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#0b0b0c;color:#e8e8ea}` +
-        `main{max-width:30rem;padding:2rem;text-align:center}h1{font-size:1.25rem;margin:0 0 .5rem}` +
-        `p{margin:.25rem 0;color:#a1a1aa}code{color:#e8e8ea}` +
-        `a{display:inline-block;margin-top:1.25rem;color:#fff;background:#3b82f6;` +
-        `padding:.6rem 1rem;border-radius:.5rem;text-decoration:none}</style></head>` +
-        `<body><main><h1>Sign-in couldn't be completed</h1>` +
-        `<p>Something went wrong finishing your sign-in.</p>` +
-        `<p>Reason: <code>${slug}</code></p>` +
-        `<a href="${retry}">Try again</a></main></body></html>`;
-      return new Response(body, {
+      // Server-side diagnostic. The browser only ever sees a coarse, allowlisted
+      // reason, so the precise internal label is logged here instead — and ONLY
+      // the label: never the code, tokens, cookies, or the callback URL (whose
+      // query string carries the authorization code).
+      console.warn(`[auth-connect] callback failed: ${reason}`);
+
+      return buildFailureResponse({
+        reason,
         status,
-        headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+        origin: url.origin,
+        signInPath,
+        defaultReturnTo,
+        errorPath: safeErrorPath,
       });
     };
 
@@ -206,13 +226,20 @@ export function createAuthConnect<S extends Record<string, unknown> = Record<str
       return fail("provision");
     }
 
-    await store.create({
-      sub: profile.sub,
-      email: profile.email ?? null,
-      name: profile.name ?? null,
-      idToken: tokens.id_token,
-      ...extra,
-    } as Omit<BaseSession, "exp"> & S);
+    // Writing the session is the last thing that can fail. Guard it too, so a
+    // cookie-store error surfaces as a handled sign-in failure (and, with
+    // `errorPath`, the app's branded page) rather than an unhandled 500.
+    try {
+      await store.create({
+        sub: profile.sub,
+        email: profile.email ?? null,
+        name: profile.name ?? null,
+        idToken: tokens.id_token,
+        ...extra,
+      } as Omit<BaseSession, "exp"> & S);
+    } catch {
+      return fail("session_create", 500);
+    }
 
     const dest = safeReturnTo(returnTo, defaultReturnTo);
     return Response.redirect(new URL(dest, url.origin).toString(), 303);

@@ -1,21 +1,15 @@
 import "server-only";
+import { isSafeInternalPath } from "./safe-path";
 
 // Validate a post-auth `returnTo` so it can never be turned into an open
-// redirect. The naive `startsWith("/")` check is broken: protocol-relative
-// inputs like "//evil.com/x" and "/\evil.com/x" pass it, and
-// `new URL(dest, origin)` then resolves them to a fully cross-origin URL.
+// redirect. The rule itself lives in `safe-path.ts` — shared with `errorPath`
+// and unit-tested there, since this module's "server-only" import makes it
+// unloadable outside a bundler.
 //
-// Accept only same-origin paths:
-//   - must begin with "/"
-//   - the second character must not be "/" or "\" (rejects protocol-relative
-//     and backslash-tricked variants that some URL parsers normalise)
-//   - everything else falls back to `fallback`
-export function safeReturnTo(
-  input: string | null | undefined,
-  fallback = "/",
-): string {
-  if (typeof input !== "string" || input.length === 0) return fallback;
-  if (input[0] !== "/") return fallback;
-  if (input.length > 1 && (input[1] === "/" || input[1] === "\\")) return fallback;
-  return input;
+// This wrapper adds the fall-back-to-default semantics a *user-supplied*
+// `returnTo` needs: an attacker-controlled value must quietly degrade to the
+// app's default landing page, never fail the sign-in. (A *configured*
+// `errorPath`, by contrast, throws — see `assertSafeErrorPath`.)
+export function safeReturnTo(input: string | null | undefined, fallback = "/"): string {
+  return isSafeInternalPath(input) ? input : fallback;
 }

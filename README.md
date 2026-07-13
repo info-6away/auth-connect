@@ -14,14 +14,24 @@ did by hand, and drifted apart doing) with a single versioned source of truth.
 
 ## Install
 
-Distributed by git URL — no private npm registry, no monorepo.
-
 ```bash
-npm install "github:info-6away/auth-connect#v1.0.2"
-# package.json:  "@6away/auth-connect": "github:info-6away/auth-connect#v1.0.2"
+npm install "github:info-6away/auth-connect#v1.0.4"
+# package.json:  "@6away/auth-connect": "github:info-6away/auth-connect#v1.0.4"
 ```
 
-Pin a tag (`#v1.0.2`, `#v1.1.0`, …) so upgrades are deliberate.
+Pin a tag (`#v1.0.4`, `#v1.1.0`, …) so upgrades are deliberate.
+
+### Package visibility — read this before you `npm install @6away/auth-connect`
+
+| | |
+| --- | --- |
+| **Distribution** | **Public GitHub repository**, installed by git URL |
+| **npm registry** | **NOT published** — not on public npm, not on a private registry |
+| **Scope name** | `@6away/…` is just the package's *name*. It does **not** imply an npm scope exists. |
+
+`npm install @6away/auth-connect` **will fail** — there is no registry entry to
+resolve. Always install from the git URL above, pinned to a tag. The install
+environment therefore needs `git` (present on Vercel and CI by default).
 
 > **Built on install.** `dist/` is **not** committed. npm runs the package's
 > `prepare` script after cloning the git ref, which builds `dist/` from source
@@ -229,10 +239,61 @@ createAuthConnect<{ userId: string }>({
 | `createAuthConnect(config)` | Returns `{ routes, getSession, requireSession, getCurrentUser, destroySession }` |
 | `createAuthMiddleware(config)` | `@6away/auth-connect/middleware` — route-protection gate |
 | `safeReturnTo(input, fallback?)` | Open-redirect-safe path validator |
+| `ERROR_REASONS` / `ErrorReason` | The allowlist of sanitised failure slugs |
 | types | `AuthConnectConfig`, `CurrentUser`, `BaseSession`, `UserInfo`, `TokenResponse` |
 
 `createAuthConnect` config: `cookieName` (required), `defaultReturnTo`,
-`scopes`, `cookiePrefix`, `signInPath`, `onSignIn`.
+`scopes`, `cookiePrefix`, `signInPath`, `onSignIn`, `errorPath`.
+
+## Branded error page (`errorPath`) — optional
+
+By default a failed sign-in callback renders auth-connect's own self-contained
+error page. To own that experience, point `errorPath` at an internal route:
+
+```ts
+// lib/auth.ts
+export const { routes, getSession, requireSession } = createAuthConnect({
+  cookieName: SESSION_COOKIE,
+  defaultReturnTo: DEFAULT_RETURN_TO,
+  errorPath: "/auth/error",          // ← opt in
+});
+```
+
+A failed callback then redirects (303) to:
+
+```
+/auth/error?reason=invalid_callback
+```
+
+Copy `template/app/auth/error/page.tsx` and render your own copy from the slug.
+
+**`reason` is the only thing passed, and it comes from a fixed allowlist:**
+
+| Slug | Means |
+| --- | --- |
+| `access_denied` | The user declined consent at the IdP |
+| `invalid_callback` | Missing/mismatched `code`/`state`, bad `nonce`, bad `id_token`, `sub` mismatch |
+| `provider_unavailable` | Token exchange or userinfo failed; IdP unhealthy. Retryable |
+| `session_failed` | Identity verified, but the session couldn't be created |
+| `configuration_error` | The app/deploy is misconfigured |
+
+Tokens, authorization codes, `state`, `nonce`, raw provider errors, exception
+messages and stack traces are **never** included. Internal cryptographic
+failures deliberately collapse into `invalid_callback` — an attacker must not be
+able to distinguish "bad signature" from "bad nonce". The precise internal
+reason is written to the **server** log instead.
+
+> ### ⚠️ The error path MUST be public
+> Do **not** include it in `PROTECTED_PATHS`. A gated error page redirects to
+> sign-in → the IdP still has a session → it calls back → the callback fails
+> again → … an infinite loop with no exit. This is precisely why the *default*
+> behaviour renders a page instead of redirecting.
+
+**Fails closed.** `errorPath` is validated at `createAuthConnect()` time and
+**throws at boot** if it isn't a plain same-origin path — `https://evil.com`,
+`//evil.com`, `/\evil.com`, `/%2f%2fevil.com`, `javascript:…` and paths with
+control characters are all rejected. It can never become an open redirect. Apps
+that don't set `errorPath` are completely unaffected.
 
 ## Security notes
 
@@ -252,18 +313,41 @@ createAuthConnect<{ userId: string }>({
   `/\evil.com`, applied both when storing and when reading.
 - **Sessions are HMAC-signed** (`SESSION_SECRET`), `httpOnly`, `secure` in
   production, and expiry-enforced on every read.
-- **Callback failures render an error page, never redirect into the app.** A
-  failed sign-in callback (bad token exchange, id_token, nonce, etc.) returns a
-  self-contained error page with a manual "Try again" link — it does **not**
-  redirect to `/`. On a fully-gated app (e.g. one whose host serves everything
-  under a protected prefix), redirecting a failure into the app would loop
-  forever (page → sign-in → IdP → callback → fail → page → …). Rendering at the
-  callback URL (which is never gated) breaks that loop.
+- **Callback failures render an error page, never redirect into the app** (by
+  default). A failed sign-in callback (bad token exchange, id_token, nonce, etc.)
+  returns a self-contained error page with a manual "Try again" link — it does
+  **not** redirect to `/`. On a fully-gated app (e.g. one whose host serves
+  everything under a protected prefix), redirecting a failure into the app would
+  loop forever (page → sign-in → IdP → callback → fail → page → …). Rendering at
+  the callback URL (which is never gated) breaks that loop. Apps that opt into
+  `errorPath` take on the responsibility of keeping that page public.
+- **Failure reasons shown to the browser are sanitised.** With `errorPath`, only
+  an allowlisted slug is passed (`access_denied`, `invalid_callback`,
+  `provider_unavailable`, `session_failed`, `configuration_error`). Raw provider
+  errors, tokens, codes, `state`, `nonce` and exception text never reach the
+  client; internal crypto failures collapse into one indistinguishable slug. The
+  configured `errorPath` itself is validated at boot and cannot become an open
+  redirect.
 - **Middleware verifies, not just sniffs.** The gate checks the cookie's
   HMAC-SHA256 signature and `exp` at the edge (Web Crypto, Edge/Node compatible),
   so a forged or expired cookie is rejected there. `getSession`/`requireSession`
   remain the authoritative server-side boundary; still don't rely on the gate
   alone for the most sensitive operations.
+
+## Troubleshooting
+
+| Symptom | Cause & fix |
+| --- | --- |
+| `invalid redirect_uri`, or the IdP rejects the callback | The `redirect_uri` must match what's registered on the client **byte-for-byte**. Check for a trailing slash on `NEXT_PUBLIC_APP_URL`, `http` vs `https`, and `www.` vs apex. Register both your localhost and production callbacks. |
+| Env var looks right but behaves as if it's wrong (bad URL, session never validates) | **Hidden whitespace or a BOM.** On Windows PowerShell, piping a value into `vercel env add` can prepend a byte-order mark, so `https://auth.6away.ai` is stored as `﻿https://…`. **Paste secrets into the Vercel dashboard instead** of piping them. Never `echo` a secret into your shell history. |
+| Changed an env var but nothing changed | **Redeploy.** Env vars are read at build/boot — editing them does not update a running deployment. |
+| Sign-in page shows the wrong product name | That's the **display name** on the client record in `auth.6away.ai/admin`, not your client ID. Fix it there. |
+| Infinite redirect loop after a failed sign-in | Your `errorPath` is **gated**. Remove it from `PROTECTED_PATHS`. |
+| Protected pages are public, or public pages demand sign-in | The `PROTECTED_PATHS` matcher. `"/app/:path*"` covers `/app` **and** everything under it; a bare `"/app"` does not. |
+| Your existing `middleware.ts` / `proxy.ts` stopped working | You dropped in the template over it. **Compose** the gate into your existing handler instead — see `template/proxy.composed.example.ts`. |
+| Signed in, but the session cookie isn't set | Cookies are `secure` in production — the app must be served over **https**. Also confirm the cookie's domain matches the host you're browsing. |
+| Sign-out lands on the wrong domain | `NEXT_PUBLIC_APP_URL` builds the post-logout redirect; it differs between local and production. |
+| `npm install @6away/auth-connect` fails | The package is **not on npm**. Install from the git URL — see [Package visibility](#package-visibility--read-this-before-you-npm-install-6awayauth-connect). |
 
 ## Versioning & upgrades
 
