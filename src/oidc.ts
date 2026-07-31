@@ -62,12 +62,23 @@ export async function fetchUserInfo(accessToken: string): Promise<UserInfo> {
   return (await res.json()) as UserInfo;
 }
 
+// Extra authorize params an RP may forward. Allowlisted and opaque here:
+// - invite_grant: a short-lived signed invitation assertion (see README).
+//   The IdP verifies it and may permit account creation on an otherwise
+//   invite-only client for that one interaction. This package never
+//   inspects or trusts it.
+// - login_hint: standard OIDC prefill for the IdP sign-in form.
+export type AuthorizeExtraParams = Partial<
+  Record<"invite_grant" | "login_hint", string>
+>;
+
 export function buildAuthorizeUrl(input: {
   state: string;
   nonce: string;
   challenge: string;
   redirectUri: string;
   scope?: string;
+  extra?: AuthorizeExtraParams;
 }): string {
   const url = new URL(`${authEnv.issuer}/oauth/authorize`);
   url.searchParams.set("client_id", authEnv.clientId);
@@ -78,6 +89,10 @@ export function buildAuthorizeUrl(input: {
   url.searchParams.set("nonce", input.nonce);
   url.searchParams.set("code_challenge", input.challenge);
   url.searchParams.set("code_challenge_method", "S256");
+  for (const key of ["invite_grant", "login_hint"] as const) {
+    const value = input.extra?.[key];
+    if (value) url.searchParams.set(key, value);
+  }
   return url.toString();
 }
 
