@@ -113,6 +113,16 @@ export function createAuthConnect<S extends Record<string, unknown> = Record<str
   async function signin(req: Request): Promise<Response> {
     const url = new URL(req.url);
     const returnTo = safeReturnTo(url.searchParams.get("returnTo"), defaultReturnTo);
+    // Allowlisted opaque passthroughs to the IdP (never stored in cookies).
+    // Length-capped so a hostile link can't smuggle an oversized blob.
+    const inviteGrant = url.searchParams.get("invite_grant");
+    const loginHint = url.searchParams.get("login_hint");
+    const extra = {
+      ...(inviteGrant && inviteGrant.length <= 2048
+        ? { invite_grant: inviteGrant }
+        : {}),
+      ...(loginHint && loginHint.length <= 254 ? { login_hint: loginHint } : {}),
+    };
     const redirectUri = callbackUriForRequest(req);
 
     const { verifier, challenge } = makePkce();
@@ -132,7 +142,7 @@ export function createAuthConnect<S extends Record<string, unknown> = Record<str
     jar.set(C.redirect, redirectUri, SHORT_COOKIE);
 
     return Response.redirect(
-      buildAuthorizeUrl({ state, nonce, challenge, redirectUri, scope: scopes }),
+      buildAuthorizeUrl({ state, nonce, challenge, redirectUri, scope: scopes, extra }),
       303,
     );
   }
