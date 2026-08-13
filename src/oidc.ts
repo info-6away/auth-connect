@@ -51,15 +51,67 @@ export async function exchangeCode(input: {
   return (await res.json()) as TokenResponse;
 }
 
+// One short retry for a TRANSIENT userinfo failure. By the time userinfo
+// runs, the user has already authenticated and been authorized and the code
+// has been exchanged — a single network blip or 5xx on this last hop must
+// not throw that completed sign-in away as `provider_unavailable`. We retry
+// exactly ONCE, with the SAME access token, only for a network error or a
+// 5xx. A 4xx (401/403/…) is a deterministic rejection of this token and is
+// never retried. Terminal behaviour is unchanged: after the retry is
+// exhausted this still throws and the caller maps it to `userinfo`.
+const USERINFO_RETRY_DELAY_MS = 200;
+
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
 export async function fetchUserInfo(accessToken: string): Promise<UserInfo> {
-  const res = await fetch(`${authEnv.issuer}/oauth/userinfo`, {
-    headers: { authorization: `Bearer ${accessToken}`, accept: "application/json" },
-    cache: "no-store",
-  });
-  if (!res.ok) {
-    throw new Error(`userinfo failed: ${res.status}`);
+  const call = (): Promise<Response> =>
+    fetch(`${authEnv.issuer}/oauth/userinfo`, {
+      headers: { authorization: `Bearer ${accessToken}`, accept: "application/json" },
+      cache: "no-store",
+    });
+
+  // Attempt 1.
+  let res: Response | null = null;
+  let networkError = false;
+  try {
+    res = await call();
+  } catch {
+    networkError = true; // fetch rejected — network/DNS/TLS/abort
   }
-  return (await res.json()) as UserInfo;
+
+  if (res && res.ok) {
+    // A malformed body on a 2xx is NOT retried (a retry can't fix it).
+    return (await res.json()) as UserInfo;
+  }
+
+  // Retry only transient failures: a network error, or a 5xx. Anything else
+  // (4xx incl. 401/403/429, or a deterministic reject) fails immediately —
+  // the same token will get the same answer.
+  const retryable = networkError || (res !== null && res.status >= 500 && res.status <= 599);
+  if (!retryable) {
+    // res is non-null here (the only non-retryable path with no response is
+    // impossible: a fetch rejection sets networkError=true → retryable).
+    throw new Error(`userinfo failed: ${res!.status}`);
+  }
+
+  // Attempt 2 — same access token, short fixed backoff. Log only the safe
+  // reason; never the token, header, body, email or sub.
+  console.warn(
+    `[auth-connect] userinfo_retry attempt=2 reason=${networkError ? "network" : "5xx"}`,
+  );
+  await sleep(USERINFO_RETRY_DELAY_MS);
+
+  let res2: Response;
+  try {
+    res2 = await call();
+  } catch {
+    throw new Error("userinfo failed: network");
+  }
+  if (res2.ok) {
+    return (await res2.json()) as UserInfo;
+  }
+  throw new Error(`userinfo failed: ${res2.status}`);
 }
 
 // Extra authorize params an RP may forward. Allowlisted and opaque here:
