@@ -1,6 +1,6 @@
 {
   "name": "@6away/auth-connect",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "Plug-and-play 6away Auth (OIDC) relying-party layer for Next.js App Router apps.",
   "type": "module",
   "license": "UNLICENSED",
@@ -25,7 +25,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "validate": "tsc -p examples/throwaway/tsconfig.json --noEmit",
     "prepare": "npm run build",
-    "test": "tsx --test src/error-path.test.ts"
+    "test": "tsx --conditions=react-server --test src/error-path.test.ts src/userinfo-retry.test.ts"
   },
   "dependencies": {
     "jose": "^5.9.6",
