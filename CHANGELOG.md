@@ -1,5 +1,27 @@
 # Changelog
 
+## v1.0.7
+
+Security fix. Backwards compatible: no API or configuration change.
+
+### Fixed
+- **Open redirect after sign-in via `returnTo`.** `?returnTo=/%09/evil.example`
+  decodes to `/<tab>/evil.example`. That passed the old first-two-characters
+  check, and the callback's `new URL(dest, origin)` dropped the tab and
+  redirected to `https://evil.example/`. Carriage return and line feed did the
+  same.
+  - `returnTo` now accepts only a same-origin relative application path.
+    The new `isSafeRedirectPath` in `safe-path.ts` enforces this. It rejects:
+    - backslashes and control characters anywhere, literal or
+      percent-encoded;
+    - values whose decoded form is unsafe;
+    - anything that resolves to another origin, which is the
+      authoritative check.
+  - A rejected value still quietly falls back to the default landing page.
+  - The check applies at sign-in and again at the callback.
+  - `errorPath` validation is unchanged.
+  - Regression tests: `src/return-to.test.ts`.
+
 ## v1.0.4
 
 Backwards compatible. Apps on v1.0.3 can upgrade without code changes.
