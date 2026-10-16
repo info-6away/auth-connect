@@ -32,3 +32,43 @@ export function hasControlChars(input: string): boolean {
   }
   return false;
 }
+
+// Origin used only to resolve a candidate and compare. Never contacted.
+const PROBE_ORIGIN = "https://auth-connect.invalid";
+
+// The post-auth redirect rule (`safeReturnTo`): a same-origin relative
+// application path, and nothing a URL parser could turn into anything else.
+//
+// `isSafeInternalPath` alone is not enough for a user-supplied value: the URL
+// parser silently drops tab, CR and LF and treats "\" as "/", so
+// "/\t/evil.com" passed the two-character check and `new URL(dest, origin)`
+// resolved it to "https://evil.com/". On top of `isSafeInternalPath` this
+// rejects:
+//   - backslashes and control characters anywhere, literal or percent-encoded;
+//   - a value whose decoded form is not itself a safe internal path
+//     ("/%2F%2Fevil.com");
+//   - anything that, resolved the way the callback resolves it, lands on
+//     another origin. This is the authoritative check; the others state the
+//     rule explicitly and catch forms a later decode could expose.
+export function isSafeRedirectPath(input: unknown): input is string {
+  if (!isSafeInternalPath(input)) return false;
+  if (input.includes("\\") || hasControlChars(input)) return false;
+
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(input);
+  } catch {
+    return false;
+  }
+  if (!isSafeInternalPath(decoded) || decoded.includes("\\") || hasControlChars(decoded)) {
+    return false;
+  }
+
+  let resolved: URL;
+  try {
+    resolved = new URL(input, PROBE_ORIGIN);
+  } catch {
+    return false;
+  }
+  return resolved.origin === PROBE_ORIGIN;
+}

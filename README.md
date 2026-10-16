@@ -198,7 +198,7 @@ With your client registered (above), run `npm run dev` and check, in order:
 2. **Sign in** — complete Google sign-in. You land back on your app at the path you started from, signed in.
 3. **Session persists** — refresh. You stay signed in (no re-auth).
 4. **Public stays public** — your marketing/landing routes load with no redirect.
-5. **Open-redirect guard** — `…/api/auth/signin?returnTo=//evil.com` must land on your app, never off-origin.
+5. **Open-redirect guard** — `…/api/auth/signin?returnTo=//evil.com` and `…?returnTo=/%09/evil.com` must land on your app, never off-origin.
 6. **Sign out** — hit `/api/auth/signout`. The session clears, you're returned to your app origin, and revisiting the protected path redirects to sign-in again.
 
 > Testing a Vercel **preview**? Register that preview host's callback too
@@ -309,8 +309,14 @@ that don't set `errorPath` are completely unaffected.
   `sub`, blocking token-substitution.
 - **Match identity by `sub`, never email.** Email can change at the IdP; `sub`
   is stable for the life of the account.
-- **`returnTo` is open-redirect-safe.** `safeReturnTo` rejects `//evil.com` and
-  `/\evil.com`, applied both when storing and when reading.
+- **`returnTo` is open-redirect-safe.** `safeReturnTo` accepts only a
+  same-origin relative path. It rejects:
+  - `//evil.com` and `/\evil.com`;
+  - backslashes and control characters (tab, CR, LF, …) anywhere, literal or
+    percent-encoded;
+  - anything that resolves to another origin.
+
+  It applies both when storing and when reading.
 - **Sessions are HMAC-signed** (`SESSION_SECRET`), `httpOnly`, `secure` in
   production, and expiry-enforced on every read.
 - **Callback failures render an error page, never redirect into the app** (by
